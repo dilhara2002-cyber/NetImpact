@@ -10,7 +10,8 @@ Tests:
 """
 
 import pytest
-from app.main import app, health_check, get_topology, run_simulation
+from fastapi.testclient import TestClient
+from app.main import app, health_check, get_topology, run_simulation, analyze_connectivity
 from app.models import PolicyRule, SimulationRequest
 from app.policy_engine import (
     simulate_policy_change,
@@ -185,3 +186,104 @@ def test_fastapi_endpoints_integration():
     assert sim_response.overall_verdict == "CRITICAL_RISK"
     assert sim_response.proposed_evaluation.status == "ALLOWED"
     assert sim_response.current_evaluation.status == "DENIED"
+
+
+def test_connectivity_permitted_flow_includes_subnet_and_rule_metadata():
+    """Milestone 2: Permitted topology flow returns source CIDR, IP, rule priority, and non-default-deny."""
+    client = TestClient(app)
+    res = client.post(
+        "/api/connectivity",
+        json={
+            "source_segment": "seg-finance",
+            "destination_resource": "res-fin-db",
+            "port": 5432,
+            "protocol": "TCP",
+            "proposed_rule": None
+        }
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["source_cidr"] == "10.10.2.0/24"
+    assert data["destination_ip"] == "10.10.2.50"
+    assert data["port"] == 5432
+    assert data["protocol"] == "TCP"
+    assert data["current_evaluation"]["status"] == "ALLOWED"
+    assert data["current_evaluation"]["matched_rule_id"] == "RULE-020"
+    assert data["current_evaluation"]["matched_rule_priority"] == 20
+    assert data["current_evaluation"]["is_default_deny"] is False
+
+
+def test_connectivity_denied_flow_exposes_default_deny_reasoning():
+    """Milestone 2: Denied flow exposes RULE-999 priority and clear default-deny reasoning."""
+    client = TestClient(app)
+    res = client.post(
+        "/api/connectivity",
+        json={
+            "source_segment": "seg-hr",
+            "destination_resource": "res-it-jumpbox",
+            "port": 22,
+            "protocol": "TCP",
+            "proposed_rule": None
+        }
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["source_cidr"] == "10.10.1.0/24"
+    assert data["destination_ip"] == "10.10.3.10"
+    assert data["current_evaluation"]["status"] == "DENIED"
+    assert data["current_evaluation"]["matched_rule_id"] == "RULE-999"
+    assert data["current_evaluation"]["matched_rule_priority"] == 999
+    assert data["current_evaluation"]["is_default_deny"] is True
+    assert "RULE-999" in data["current_evaluation"]["default_deny_reason"]
+
+
+def test_connectivity_connects_before_after_proposed_policy_simulation():
+    """Milestone 2: Connectivity endpoint evaluates both baseline and proposed policy delta."""
+    req = SimulationRequest(
+        source_segment="seg-hr",
+        destination_resource="res-fin-db",
+        port=5432,
+        protocol="TCP",
+        proposed_rule=PolicyRule(
+            id="RULE-TOPO-TEST",
+            name="Proposed HR DB Access",
+            source_segment="seg-hr",
+            destination_resource="res-fin-db",
+            port=5432,
+            protocol="TCP",
+            action="ALLOW",
+            priority=15
+        )
+    )
+    result = analyze_connectivity(req)
+    assert result.current_evaluation.status == "DENIED"
+    assert result.proposed_evaluation.status == "ALLOWED"
+    assert result.change_type == "ACCESS_GRANTED"
+    assert result.risk_detected is True
+    assert result.violations[0].guardrail_id == "SG-01"
+
+
+def test_connectivity_rejects_unknown_segment_or_resource():
+    """Milestone 2: Unknown segment or resource returns HTTP 400."""
+    client = TestClient(app)
+    bad_seg = client.post(
+        "/api/connectivity",
+        json={
+            "source_segment": "seg-nonexistent",
+            "destination_resource": "res-fin-db",
+            "port": 5432,
+            "protocol": "TCP"
+        }
+    )
+    assert bad_seg.status_code == 400
+
+    bad_res = client.post(
+        "/api/connectivity",
+        json={
+            "source_segment": "seg-hr",
+            "destination_resource": "res-nonexistent",
+            "port": 5432,
+            "protocol": "TCP"
+        }
+    )
+    assert bad_res.status_code == 400

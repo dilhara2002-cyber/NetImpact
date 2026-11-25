@@ -93,6 +93,20 @@ def evaluate_connection_against_rules(
     for rule in sorted_rules:
         if rule_matches(rule, source_segment, destination_resource, port, protocol):
             action_status = "ALLOWED" if rule.action == "ALLOW" else "DENIED"
+            is_default_deny = (
+                rule.action == "DENY"
+                and rule.source_segment == "*"
+                and rule.destination_resource == "*"
+                and rule.port is None
+            )
+            default_deny_reason = None
+            if is_default_deny:
+                default_deny_reason = (
+                    f"No higher-priority rule permitted traffic from '{source_segment}' to "
+                    f"'{destination_resource}' on {protocol.upper()}/{port}. "
+                    f"Connection fell through to {rule.id} ({rule.name}, Priority {rule.priority}): "
+                    f"{rule.description or 'Zero-trust default-deny baseline.'}"
+                )
             explanation = (
                 f"Matched Rule '{rule.name}' (Priority {rule.priority}): "
                 f"Action set to {rule.action}."
@@ -103,17 +117,27 @@ def evaluate_connection_against_rules(
                 matched_rule_name=rule.name,
                 matched_rule_priority=rule.priority,
                 action=rule.action,
-                explanation=explanation
+                explanation=explanation,
+                matched_rule_description=rule.description,
+                is_default_deny=is_default_deny,
+                default_deny_reason=default_deny_reason
             )
     
     # Strict Default-Deny Fallback
+    fallback_reason = (
+        f"No matching firewall rule found for '{source_segment}' to '{destination_resource}' "
+        f"on {protocol.upper()}/{port}. Connection blocked by implicit default-deny."
+    )
     return RuleEvaluation(
         status="DENIED",
         matched_rule_id="DEFAULT-DENY",
         matched_rule_name="Implicit Default Deny",
         matched_rule_priority=9999,
         action="DENY",
-        explanation="No matching firewall rule found. Connection blocked by implicit default-deny."
+        explanation=fallback_reason,
+        matched_rule_description="Implicit fallback rule applied when no explicit rule matches.",
+        is_default_deny=True,
+        default_deny_reason=fallback_reason
     )
 
 
@@ -164,10 +188,12 @@ def simulate_policy_change(
     # Retrieve segment and resource metadata for human-friendly reports
     source_info = segments.get(source_segment)
     source_name = source_info.name if source_info else source_segment
+    source_cidr = source_info.cidr if source_info else "Unknown"
     
     dest_info = resources.get(destination_resource)
     dest_name = dest_info.name if dest_info else destination_resource
     dest_ip = dest_info.ip if dest_info else "Unknown"
+    dest_segment_id = dest_info.segment_id if dest_info else None
     is_critical = dest_info.is_critical if dest_info else False
     
     # 1. Evaluate Current State
@@ -241,9 +267,11 @@ def simulate_policy_change(
     return SimulationResponse(
         source_segment=source_segment,
         source_segment_name=source_name,
+        source_cidr=source_cidr,
         destination_resource=destination_resource,
         destination_resource_name=dest_name,
         destination_ip=dest_ip,
+        destination_segment_id=dest_segment_id,
         port=port,
         protocol=protocol.upper(),
         is_critical_target=is_critical,

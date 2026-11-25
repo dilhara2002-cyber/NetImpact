@@ -61,6 +61,9 @@ class RuleEvaluation(BaseModel):
     matched_rule_priority: int
     action: Literal["ALLOW", "DENY"]
     explanation: str
+    matched_rule_description: Optional[str] = None
+    is_default_deny: bool = False
+    default_deny_reason: Optional[str] = None
 
 
 class GuardrailViolation(BaseModel):
@@ -74,9 +77,11 @@ class GuardrailViolation(BaseModel):
 class SimulationResponse(BaseModel):
     source_segment: str
     source_segment_name: str
+    source_cidr: str = "Unknown"
     destination_resource: str
     destination_resource_name: str
     destination_ip: str
+    destination_segment_id: Optional[str] = None
     port: int
     protocol: str
     is_critical_target: bool

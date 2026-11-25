@@ -1,159 +1,34 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   Shield,
   ShieldAlert,
   ShieldCheck,
   Network,
-  ArrowRight,
   AlertTriangle,
   CheckCircle2,
   XCircle,
-  Database,
-  Lock,
   Play,
   FileText,
-  Server,
   Layers,
-  HelpCircle
+  RefreshCw
 } from 'lucide-react';
-
-const FALLBACK_SEGMENTS = [
-  {
-    id: "seg-hr",
-    name: "Human Resources Segment",
-    cidr: "10.10.1.0/24",
-    security_zone: "Internal-General",
-    description: "Standard corporate workstations for HR staff. Should only access general intranet."
-  },
-  {
-    id: "seg-finance",
-    name: "Finance Segment",
-    cidr: "10.10.2.0/24",
-    security_zone: "Finance-Restricted",
-    description: "Dedicated subnet for finance team workstations and financial processing."
-  },
-  {
-    id: "seg-it",
-    name: "IT Administration Segment",
-    cidr: "10.10.3.0/24",
-    security_zone: "Management-Restricted",
-    description: "Privileged administration network for IT operations, jump hosts, and network engineering."
-  }
-];
-
-const FALLBACK_RESOURCES = [
-  {
-    id: "res-fin-db",
-    name: "Finance Core Database",
-    ip: "10.10.2.50",
-    port: 5432,
-    protocol: "TCP",
-    segment_id: "seg-finance",
-    is_critical: true,
-    description: "High-security PostgreSQL database storing company ledger, bank accounts, and payroll records."
-  },
-  {
-    id: "res-fin-web",
-    name: "Finance Internal Portal",
-    ip: "10.10.2.20",
-    port: 443,
-    protocol: "TCP",
-    segment_id: "seg-finance",
-    is_critical: false,
-    description: "Internal web portal used for corporate expense reports and travel reimbursements."
-  },
-  {
-    id: "res-it-jumpbox",
-    name: "IT Management Jumpbox",
-    ip: "10.10.3.10",
-    port: 22,
-    protocol: "TCP",
-    segment_id: "seg-it",
-    is_critical: false,
-    description: "Bastion server used by IT administrators for secure SSH access into production infrastructure."
-  }
-];
-
-const FALLBACK_POLICIES = [
-  {
-    id: "RULE-010",
-    name: "Allow IT SSH to Management Jumpbox",
-    source_segment: "seg-it",
-    destination_resource: "res-it-jumpbox",
-    port: 22,
-    protocol: "TCP",
-    action: "ALLOW",
-    priority: 10,
-    description: "Permits IT administrators secure SSH access to the management bastion."
-  },
-  {
-    id: "RULE-020",
-    name: "Allow Finance to Finance Core Database",
-    source_segment: "seg-finance",
-    destination_resource: "res-fin-db",
-    port: 5432,
-    protocol: "TCP",
-    action: "ALLOW",
-    priority: 20,
-    description: "Authorized database queries from verified Finance staff machines."
-  },
-  {
-    id: "RULE-030",
-    name: "Allow Corporate Users to Finance Expense Portal",
-    source_segment: "*",
-    destination_resource: "res-fin-web",
-    port: 443,
-    protocol: "TCP",
-    action: "ALLOW",
-    priority: 30,
-    description: "Enables all corporate users (HR, Finance, IT) to submit expense reports over HTTPS."
-  },
-  {
-    id: "RULE-999",
-    name: "Default Deny All",
-    source_segment: "*",
-    destination_resource: "*",
-    port: null,
-    protocol: "ANY",
-    action: "DENY",
-    priority: 999,
-    description: "Implicit default-deny baseline for zero-trust security."
-  }
-];
-
-const FALLBACK_GUARDRAILS = [
-  {
-    id: "SG-01",
-    name: "HR to Finance Database Isolation",
-    forbidden_source: "seg-hr",
-    forbidden_destination: "res-fin-db",
-    severity: "CRITICAL",
-    description: "The HR subnet must NEVER have direct access to the Finance Core Database.",
-    rationale: "Violates Segregation of Duties (SoD) under SOC2, ISO 27001, and PCI-DSS standards."
-  },
-  {
-    id: "SG-02",
-    name: "Block Untrusted Direct Access to Management Jumpbox",
-    forbidden_source: "seg-hr",
-    forbidden_destination: "res-it-jumpbox",
-    severity: "HIGH",
-    description: "Non-IT departments are barred from administrative bastion jumpboxes.",
-    rationale: "Prevents lateral movement and privilege escalation by non-administrative users."
-  }
-];
+import NetworkTopology from './NetworkTopology';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('simulator');
   const [backendOnline, setBackendOnline] = useState(false);
+  const [topologyLoading, setTopologyLoading] = useState(true);
+  const [apiError, setApiError] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [simulationError, setSimulationError] = useState(null);
 
-  // Data states
-  const [segments, setSegments] = useState(FALLBACK_SEGMENTS);
-  const [resources, setResources] = useState(FALLBACK_RESOURCES);
-  const [policies, setPolicies] = useState(FALLBACK_POLICIES);
-  const [guardrails, setGuardrails] = useState(FALLBACK_GUARDRAILS);
+  // Data states loaded exclusively from FastAPI endpoints
+  const [segments, setSegments] = useState([]);
+  const [resources, setResources] = useState([]);
+  const [policies, setPolicies] = useState([]);
+  const [guardrails, setGuardrails] = useState([]);
 
-  // Form State
+  // Shared Connection Form State (synced between Simulator & Interactive Topology)
   const [sourceSegment, setSourceSegment] = useState('seg-hr');
   const [destinationResource, setDestinationResource] = useState('res-fin-db');
   const [port, setPort] = useState(5432);
@@ -165,64 +40,166 @@ export default function App() {
   const [proposedRuleAction, setProposedRuleAction] = useState('ALLOW');
   const [proposedRulePriority, setProposedRulePriority] = useState(15);
 
-  // Simulation Results
+  // Simulation & Topology Connectivity Results (calculated by Python policy engine)
   const [simulationResult, setSimulationResult] = useState(null);
+  const [connectivityResult, setConnectivityResult] = useState(null);
+  const [connectivityLoading, setConnectivityLoading] = useState(false);
+  const [connectivityError, setConnectivityError] = useState(null);
+  const [policyViewMode, setPolicyViewMode] = useState('baseline');
 
-  // Initial Data Fetch
+  const fetchAllBackendData = useCallback(async () => {
+    setTopologyLoading(true);
+    setApiError(null);
+    try {
+      const healthRes = await fetch('/api/health');
+      if (!healthRes.ok) {
+        throw new Error('Backend health check failed.');
+      }
+
+      const [topoRes, policiesRes, guardrailsRes] = await Promise.all([
+        fetch('/api/network-topology'),
+        fetch('/api/policies/current'),
+        fetch('/api/security-guardrails')
+      ]);
+
+      if (!topoRes.ok || !policiesRes.ok || !guardrailsRes.ok) {
+        throw new Error('Failed to load network topology or policy data from FastAPI.');
+      }
+
+      const topoData = await topoRes.json();
+      const policiesData = await policiesRes.json();
+      const guardrailsData = await guardrailsRes.json();
+
+      const loadedSegments = topoData.segments || [];
+      const loadedResources = topoData.resources || [];
+
+      setSegments(loadedSegments);
+      setResources(loadedResources);
+      setPolicies(policiesData);
+      setGuardrails(guardrailsData);
+      setBackendOnline(true);
+
+      if (loadedSegments.length > 0 && !loadedSegments.some((s) => s.id === sourceSegment)) {
+        setSourceSegment(loadedSegments[0].id);
+      }
+      if (loadedResources.length > 0 && !loadedResources.some((r) => r.id === destinationResource)) {
+        setDestinationResource(loadedResources[0].id);
+        setPort(loadedResources[0].port);
+        setProtocol(loadedResources[0].protocol || 'TCP');
+      }
+    } catch (err) {
+      setBackendOnline(false);
+      setApiError(
+        err instanceof Error
+          ? `${err.message} Start FastAPI with uvicorn on http://127.0.0.1:8000.`
+          : 'Unable to reach FastAPI backend at http://127.0.0.1:8000.'
+      );
+    } finally {
+      setTopologyLoading(false);
+    }
+  }, [sourceSegment, destinationResource]);
+
   useEffect(() => {
-    checkBackendHealth();
+    fetchAllBackendData();
   }, []);
 
-  const checkBackendHealth = async () => {
-    try {
-      const res = await fetch('/api/health');
-      if (res.ok) {
-        setBackendOnline(true);
-        fetchTopology();
-        fetchPolicies();
-        fetchGuardrails();
-      } else {
-        setBackendOnline(false);
-      }
-    } catch {
-      setBackendOnline(false);
-    }
-  };
+  const buildRequestPayload = useCallback(() => {
+    const parsedPort = parseInt(port, 10);
+    const parsedPriority = parseInt(proposedRulePriority, 10);
 
-  const fetchTopology = async () => {
-    try {
-      const res = await fetch('/api/network-topology');
-      if (res.ok) {
-        const data = await res.json();
-        setSegments(data.segments);
-        setResources(data.resources);
-      }
-    } catch {
-      // Keep fallbacks
-    }
-  };
+    return {
+      source_segment: sourceSegment,
+      destination_resource: destinationResource,
+      port: Number.isNaN(parsedPort) ? 0 : parsedPort,
+      protocol: (protocol || 'TCP').toUpperCase(),
+      proposed_rule: hasProposedRule
+        ? {
+            id: 'RULE-PROPOSED-001',
+            name: proposedRuleName || 'Proposed Policy Rule',
+            source_segment: sourceSegment,
+            destination_resource: destinationResource,
+            port: Number.isNaN(parsedPort) ? 0 : parsedPort,
+            protocol: (protocol || 'TCP').toUpperCase(),
+            action: proposedRuleAction,
+            priority: Number.isNaN(parsedPriority) ? 15 : parsedPriority,
+            description: 'User-defined proposed rule simulated via NetImpact'
+          }
+        : null
+    };
+  }, [
+    sourceSegment,
+    destinationResource,
+    port,
+    protocol,
+    hasProposedRule,
+    proposedRuleName,
+    proposedRuleAction,
+    proposedRulePriority
+  ]);
 
-  const fetchPolicies = async () => {
-    try {
-      const res = await fetch('/api/policies/current');
-      if (res.ok) {
-        const data = await res.json();
-        setPolicies(data);
-      }
-    } catch {
-      // Keep fallbacks
+  const evaluateConnectivity = useCallback(async () => {
+    if (!backendOnline || segments.length === 0 || resources.length === 0) {
+      return;
     }
-  };
 
-  const fetchGuardrails = async () => {
+    const parsedPort = parseInt(port, 10);
+    if (Number.isNaN(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
+      setConnectivityError('Please enter a valid port number between 1 and 65535.');
+      return;
+    }
+
+    setConnectivityLoading(true);
+    setConnectivityError(null);
+
     try {
-      const res = await fetch('/api/security-guardrails');
-      if (res.ok) {
-        const data = await res.json();
-        setGuardrails(data);
+      const response = await fetch('/api/connectivity', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(buildRequestPayload())
+      });
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.detail || 'Connectivity evaluation failed.');
       }
-    } catch {
-      // Keep fallbacks
+
+      const data = await response.json();
+      setConnectivityResult(data);
+    } catch (err) {
+      setConnectivityError(
+        err instanceof Error ? err.message : 'Unable to evaluate connectivity via FastAPI.'
+      );
+    } finally {
+      setConnectivityLoading(false);
+    }
+  }, [backendOnline, segments.length, resources.length, port, buildRequestPayload]);
+
+  // Automatically re-evaluate topology connectivity via Python backend when inputs change
+  useEffect(() => {
+    if (!backendOnline || segments.length === 0 || resources.length === 0) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      evaluateConnectivity();
+    }, 180);
+    return () => clearTimeout(timer);
+  }, [backendOnline, segments.length, resources.length, evaluateConnectivity]);
+
+  // Keep policyViewMode valid if proposed rule is toggled off
+  useEffect(() => {
+    if (!hasProposedRule && policyViewMode === 'proposed') {
+      setPolicyViewMode('baseline');
+    }
+  }, [hasProposedRule, policyViewMode]);
+
+  const handleSelectDestinationResource = (resourceId) => {
+    setDestinationResource(resourceId);
+    const selected = resources.find((item) => item.id === resourceId);
+    if (selected) {
+      setPort(selected.port);
+      if (selected.protocol) {
+        setProtocol(selected.protocol);
+      }
     }
   };
 
@@ -258,137 +235,46 @@ export default function App() {
     }
   };
 
-  // Run Simulation
+  // Run Simulation strictly via FastAPI policy engine
   const handleSimulate = async () => {
-    setLoading(true);
+    const parsedPort = parseInt(port, 10);
+    if (Number.isNaN(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
+      setSimulationError('Please enter a valid port number between 1 and 65535.');
+      return;
+    }
 
-    const payload = {
-      source_segment: sourceSegment,
-      destination_resource: destinationResource,
-      port: parseInt(port, 10),
-      protocol: protocol.toUpperCase(),
-      proposed_rule: hasProposedRule ? {
-        id: "RULE-PROPOSED-" + Math.floor(Math.random() * 1000),
-        name: proposedRuleName,
-        source_segment: sourceSegment,
-        destination_resource: destinationResource,
-        port: parseInt(port, 10),
-        protocol: protocol.toUpperCase(),
-        action: proposedRuleAction,
-        priority: parseInt(proposedRulePriority, 10),
-        description: "User-defined proposed rule simulated via NetImpact"
-      } : null
-    };
+    setLoading(true);
+    setSimulationError(null);
 
     try {
       const response = await fetch('/api/simulate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(buildRequestPayload())
       });
 
-      if (response.ok) {
-        const data = await response.json();
-        setSimulationResult(data);
-        setBackendOnline(true);
-        setLoading(false);
-        return;
-      }
-    } catch {
-      // Backend offline: run client-side simulation fallback
-    }
-
-    // Client-side fallback simulation logic for offline testing
-    setTimeout(() => {
-      const sourceObj = segments.find(s => s.id === sourceSegment);
-      const destObj = resources.find(r => r.id === destinationResource);
-
-      // Baseline current evaluation
-      let currentStatus = "DENIED";
-      let currentRule = "Default Deny All (Priority 999)";
-      let currentRuleId = "RULE-999";
-
-      if (sourceSegment === 'seg-finance' && destinationResource === 'res-fin-db' && port === 5432) {
-        currentStatus = "ALLOWED";
-        currentRule = "Allow Finance to Finance Core Database (Priority 20)";
-        currentRuleId = "RULE-020";
-      } else if (destinationResource === 'res-fin-web' && port === 443) {
-        currentStatus = "ALLOWED";
-        currentRule = "Allow Corporate Users to Finance Expense Portal (Priority 30)";
-        currentRuleId = "RULE-030";
-      } else if (sourceSegment === 'seg-it' && destinationResource === 'res-it-jumpbox' && port === 22) {
-        currentStatus = "ALLOWED";
-        currentRule = "Allow IT SSH to Management Jumpbox (Priority 10)";
-        currentRuleId = "RULE-010";
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.detail || 'Policy simulation request failed.');
       }
 
-      // Proposed evaluation
-      let proposedStatus = currentStatus;
-      let proposedRuleTitle = currentRule;
-      let proposedId = currentRuleId;
-      let proposedPrio = 999;
-
+      const data = await response.json();
+      setSimulationResult(data);
+      setConnectivityResult(data);
+      setBackendOnline(true);
       if (hasProposedRule) {
-        proposedStatus = proposedRuleAction === "ALLOW" ? "ALLOWED" : "DENIED";
-        proposedRuleTitle = `${proposedRuleName} (Priority ${proposedRulePriority})`;
-        proposedId = "RULE-PROPOSED";
-        proposedPrio = proposedRulePriority;
+        setPolicyViewMode('proposed');
       }
-
-      // Guardrail check
-      const violations = [];
-      let riskDetected = false;
-
-      if (proposedStatus === "ALLOWED") {
-        if (sourceSegment === 'seg-hr' && destinationResource === 'res-fin-db') {
-          riskDetected = true;
-          violations.push({
-            guardrail_id: "SG-01",
-            name: "HR to Finance Database Isolation",
-            severity: "CRITICAL",
-            description: "The HR subnet must NEVER have direct access to the Finance Core Database.",
-            rationale: "Violates Segregation of Duties (SoD) under SOC2 and PCI-DSS compliance frameworks."
-          });
-        }
-      }
-
-      const result = {
-        source_segment: sourceSegment,
-        source_segment_name: sourceObj ? sourceObj.name : sourceSegment,
-        destination_resource: destinationResource,
-        destination_resource_name: destObj ? destObj.name : destinationResource,
-        destination_ip: destObj ? destObj.ip : '10.10.x.x',
-        port: port,
-        protocol: protocol,
-        is_critical_target: destObj ? destObj.is_critical : false,
-        current_evaluation: {
-          status: currentStatus,
-          matched_rule_id: currentRuleId,
-          matched_rule_name: currentRule,
-          matched_rule_priority: 20,
-          action: currentStatus === "ALLOWED" ? "ALLOW" : "DENY",
-          explanation: `Evaluated under baseline rules: Action is ${currentStatus}.`
-        },
-        proposed_evaluation: {
-          status: proposedStatus,
-          matched_rule_id: proposedId,
-          matched_rule_name: proposedRuleTitle,
-          matched_rule_priority: proposedPrio,
-          action: proposedStatus === "ALLOWED" ? "ALLOW" : "DENY",
-          explanation: `Evaluated with proposed change: Action is ${proposedStatus}.`
-        },
-        change_type: currentStatus === proposedStatus ? "NO_CHANGE" : (proposedStatus === "ALLOWED" ? "ACCESS_GRANTED" : "ACCESS_REVOKED"),
-        risk_detected: riskDetected,
-        violations: violations,
-        overall_verdict: riskDetected ? "CRITICAL_RISK" : (proposedStatus === "ALLOWED" ? "POLICY_CHANGE_OK" : "BLOCKED"),
-        recommendation: riskDetected 
-          ? "REJECT DEPLOYMENT: Proposed rule violates critical security guardrail SG-01 (HR to Finance Database Isolation)."
-          : "SAFE TO REVIEW: Proposed configuration complies with active security policies."
-      };
-
-      setSimulationResult(result);
+    } catch (err) {
+      setBackendOnline(false);
+      setSimulationError(
+        err instanceof Error
+          ? `${err.message} Make sure the FastAPI backend is running on port 8000.`
+          : 'Could not reach the FastAPI policy engine.'
+      );
+    } finally {
       setLoading(false);
-    }, 200);
+    }
   };
 
   return (
@@ -419,7 +305,7 @@ export default function App() {
             onClick={() => setActiveTab('topology')}
           >
             <Network size={18} />
-            <span>Network Segments</span>
+            <span>Network Topology</span>
           </button>
 
           <button
@@ -442,7 +328,7 @@ export default function App() {
         <div className="sidebar-footer">
           <div className="status-badge">
             <span className={`status-dot ${backendOnline ? '' : 'offline'}`}></span>
-            <span>{backendOnline ? 'FastAPI Connected' : 'Local Sandbox Mode'}</span>
+            <span>{backendOnline ? 'FastAPI Connected' : 'FastAPI Offline'}</span>
           </div>
         </div>
       </aside>
@@ -453,21 +339,21 @@ export default function App() {
           <div className="header-title">
             <h2>
               {activeTab === 'simulator' && 'Network Access Simulation & Impact Analysis'}
-              {activeTab === 'topology' && 'Network Topology & Critical Assets'}
+              {activeTab === 'topology' && 'Interactive Network Topology & Connectivity Analysis'}
               {activeTab === 'guardrails' && 'Predefined Security Guardrails'}
               {activeTab === 'policies' && 'Current Baseline Firewall Policies'}
             </h2>
             <p>
               {activeTab === 'simulator' && 'Evaluate proposed firewall rules and detect security policy violations before deployment.'}
-              {activeTab === 'topology' && 'Overview of configured corporate subnets and sensitive backend endpoints.'}
+              {activeTab === 'topology' && 'Visualize segments, critical assets, firewall boundaries, and live policy connectivity.'}
               {activeTab === 'guardrails' && 'Hard isolation boundaries enforced independently from firewall rules.'}
               {activeTab === 'policies' && 'Current active allow and default-deny access control rules.'}
             </p>
           </div>
 
-          <div style={{ display: 'flex', gap: '8px' }}>
-            <span className="badge badge-warning">Milestone 1 MVP</span>
-            <span className="badge badge-allowed">Python 3.13 + React</span>
+          <div className="header-badges">
+            <span className="badge badge-warning">Milestone 2</span>
+            <span className="badge badge-allowed">FastAPI + React</span>
           </div>
         </header>
 
@@ -475,6 +361,24 @@ export default function App() {
           {/* TAB 1: POLICY SIMULATOR */}
           {activeTab === 'simulator' && (
             <div>
+              {!backendOnline && (
+                <div className="offline-banner" role="alert">
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <AlertTriangle size={22} color="#fbbf24" />
+                    <div>
+                      <strong>FastAPI Backend Disconnected</strong>
+                      <p style={{ fontSize: '0.86rem', color: '#fde68a', marginTop: '2px' }}>
+                        {apiError || 'Start FastAPI on port 8000 to load segments and evaluate firewall policies.'}
+                      </p>
+                    </div>
+                  </div>
+                  <button className="btn-preset" onClick={fetchAllBackendData}>
+                    <RefreshCw size={15} />
+                    <span>Retry Connection</span>
+                  </button>
+                </div>
+              )}
+
               {/* Presets Bar */}
               <div className="presets-bar">
                 <div className="presets-label">Quick Demonstration Presets:</div>
@@ -484,21 +388,21 @@ export default function App() {
                     onClick={() => loadScenario('risky-hr')}
                   >
                     <AlertTriangle size={15} color="#ef4444" />
-                    <span>🚨 Test Risky HR $\rightarrow$ Finance DB Rule</span>
+                    <span>🚨 Test Risky HR → Finance DB Rule</span>
                   </button>
                   <button
                     className="btn-preset"
                     onClick={() => loadScenario('safe-finance')}
                   >
                     <CheckCircle2 size={15} color="#10b981" />
-                    <span>✅ Test Permitted Finance $\rightarrow$ Finance DB</span>
+                    <span>✅ Test Permitted Finance → Finance DB</span>
                   </button>
                   <button
                     className="btn-preset"
                     onClick={() => loadScenario('denied-jumpbox')}
                   >
                     <XCircle size={15} color="#9ca3af" />
-                    <span>⛔ Test Denied HR $\rightarrow$ IT Jumpbox</span>
+                    <span>⛔ Test Denied HR → IT Jumpbox</span>
                   </button>
                   <button
                     className="btn-preset"
@@ -524,12 +428,17 @@ export default function App() {
                       className="form-control"
                       value={sourceSegment}
                       onChange={(e) => setSourceSegment(e.target.value)}
+                      disabled={segments.length === 0}
                     >
-                      {segments.map((seg) => (
-                        <option key={seg.id} value={seg.id}>
-                          {seg.name} ({seg.cidr})
-                        </option>
-                      ))}
+                      {segments.length === 0 ? (
+                        <option value="">Loading segments from API...</option>
+                      ) : (
+                        segments.map((seg) => (
+                          <option key={seg.id} value={seg.id}>
+                            {seg.name} ({seg.cidr})
+                          </option>
+                        ))
+                      )}
                     </select>
                   </div>
 
@@ -538,17 +447,18 @@ export default function App() {
                     <select
                       className="form-control"
                       value={destinationResource}
-                      onChange={(e) => {
-                        setDestinationResource(e.target.value);
-                        const r = resources.find(item => item.id === e.target.value);
-                        if (r) setPort(r.port);
-                      }}
+                      onChange={(e) => handleSelectDestinationResource(e.target.value)}
+                      disabled={resources.length === 0}
                     >
-                      {resources.map((res) => (
-                        <option key={res.id} value={res.id}>
-                          {res.name} ({res.ip}) {res.is_critical ? '⭐ [CRITICAL]' : ''}
-                        </option>
-                      ))}
+                      {resources.length === 0 ? (
+                        <option value="">Loading resources from API...</option>
+                      ) : (
+                        resources.map((res) => (
+                          <option key={res.id} value={res.id}>
+                            {res.name} ({res.ip}) {res.is_critical ? '⭐ [CRITICAL]' : ''}
+                          </option>
+                        ))
+                      )}
                     </select>
                   </div>
 
@@ -635,14 +545,37 @@ export default function App() {
                   )}
                 </div>
 
-                <button
-                  className="btn-simulate"
-                  onClick={handleSimulate}
-                  disabled={loading}
-                >
-                  <Play size={18} />
-                  <span>{loading ? 'Evaluating Policies...' : 'Run Security Impact Simulation'}</span>
-                </button>
+                <div className="simulator-actions-row">
+                  <button
+                    className="btn-simulate"
+                    onClick={handleSimulate}
+                    disabled={loading || !backendOnline || segments.length === 0 || resources.length === 0}
+                  >
+                    <Play size={18} />
+                    <span>{loading ? 'Evaluating Policies...' : 'Run Security Impact Simulation'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    className="btn-preset"
+                    onClick={() => {
+                      if (hasProposedRule) {
+                        setPolicyViewMode('proposed');
+                      }
+                      setActiveTab('topology');
+                    }}
+                  >
+                    <Network size={16} color="#60a5fa" />
+                    <span>View Path in Network Topology</span>
+                  </button>
+                </div>
+
+                {simulationError && (
+                  <div className="error-callout" role="alert">
+                    <AlertTriangle size={18} color="#f87171" />
+                    <span>{simulationError}</span>
+                  </div>
+                )}
               </div>
 
               {/* SIMULATION RESULTS VIEW */}
@@ -695,19 +628,32 @@ export default function App() {
 
                   {/* Before vs. After Side-by-Side Comparison */}
                   <div className="card" style={{ marginTop: '24px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                    <div className="comparison-card-top">
                       <h3 className="card-title" style={{ margin: 0 }}>
                         <Layers size={20} color="#3b82f6" />
                         <span>Before vs. After Policy Impact Analysis</span>
                       </h3>
 
-                      <span className={`badge ${
-                        simulationResult.change_type === 'ACCESS_GRANTED'
-                          ? (simulationResult.risk_detected ? 'badge-critical' : 'badge-allowed')
-                          : (simulationResult.change_type === 'ACCESS_REVOKED' ? 'badge-denied' : 'badge-warning')
-                      }`}>
-                        Delta: {simulationResult.change_type}
-                      </span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                        <span className={`badge ${
+                          simulationResult.change_type === 'ACCESS_GRANTED'
+                            ? (simulationResult.risk_detected ? 'badge-critical' : 'badge-allowed')
+                            : (simulationResult.change_type === 'ACCESS_REVOKED' ? 'badge-denied' : 'badge-warning')
+                        }`}>
+                          Delta: {simulationResult.change_type}
+                        </span>
+                        <button
+                          type="button"
+                          className="btn-preset"
+                          onClick={() => {
+                            setPolicyViewMode(hasProposedRule ? 'proposed' : 'baseline');
+                            setActiveTab('topology');
+                          }}
+                        >
+                          <Network size={14} color="#60a5fa" />
+                          <span>Inspect in Topology</span>
+                        </button>
+                      </div>
                     </div>
 
                     <div className="comparison-container">
@@ -781,7 +727,7 @@ export default function App() {
                           <span className="meta-label">Security Evaluation:</span>
                           <span style={{ fontSize: '0.84rem', color: simulationResult.risk_detected ? '#fca5a5' : '#9ca3af' }}>
                             {simulationResult.risk_detected
-                              ? 'Traffic is allowed by the proposed rule, but rejected by Independent Security Guardrail SG-01.'
+                              ? `Traffic is allowed by the proposed rule, but rejected by Independent Security Guardrail ${simulationResult.violations.map((v) => v.guardrail_id).join(', ')}.`
                               : simulationResult.proposed_evaluation.explanation
                             }
                           </span>
@@ -794,59 +740,35 @@ export default function App() {
             </div>
           )}
 
-          {/* TAB 2: NETWORK TOPOLOGY */}
+          {/* TAB 2: INTERACTIVE NETWORK TOPOLOGY */}
           {activeTab === 'topology' && (
-            <div>
-              <div className="card">
-                <h3 className="card-title">
-                  <Network size={20} color="#3b82f6" />
-                  <span>Configured Network Segments</span>
-                </h3>
-
-                <div className="topology-grid">
-                  {segments.map((seg) => (
-                    <div key={seg.id} className="segment-card">
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <strong style={{ fontSize: '1rem' }}>{seg.name}</strong>
-                        <span className="segment-badge">{seg.cidr}</span>
-                      </div>
-                      <div style={{ fontSize: '0.8rem', color: '#60a5fa' }}>
-                        Zone: {seg.security_zone}
-                      </div>
-                      <p style={{ fontSize: '0.85rem', color: '#9ca3af' }}>
-                        {seg.description}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div className="card">
-                <h3 className="card-title">
-                  <Database size={20} color="#3b82f6" />
-                  <span>Destination Resources & Sensitive Endpoints</span>
-                </h3>
-
-                <div className="topology-grid">
-                  {resources.map((res) => (
-                    <div key={res.id} className="segment-card" style={res.is_critical ? { borderColor: '#ef4444' } : {}}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <strong style={{ fontSize: '1rem' }}>{res.name}</strong>
-                        {res.is_critical && (
-                          <span className="badge badge-critical">⭐ Critical Asset</span>
-                        )}
-                      </div>
-                      <div style={{ fontFamily: 'var(--font-mono)', fontSize: '0.85rem', color: '#93c5fd' }}>
-                        {res.ip} : {res.port} ({res.protocol})
-                      </div>
-                      <p style={{ fontSize: '0.85rem', color: '#9ca3af' }}>
-                        {res.description}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
+            <NetworkTopology
+              segments={segments}
+              resources={resources}
+              backendOnline={backendOnline}
+              topologyLoading={topologyLoading}
+              apiError={apiError}
+              onRetryConnection={fetchAllBackendData}
+              sourceSegment={sourceSegment}
+              onSelectSourceSegment={setSourceSegment}
+              destinationResource={destinationResource}
+              onSelectDestinationResource={handleSelectDestinationResource}
+              port={port}
+              onChangePort={setPort}
+              protocol={protocol}
+              onChangeProtocol={setProtocol}
+              hasProposedRule={hasProposedRule}
+              proposedRuleName={proposedRuleName}
+              proposedRuleAction={proposedRuleAction}
+              proposedRulePriority={proposedRulePriority}
+              policyViewMode={policyViewMode}
+              onChangePolicyViewMode={setPolicyViewMode}
+              connectivityResult={connectivityResult}
+              connectivityLoading={connectivityLoading}
+              connectivityError={connectivityError}
+              onRefreshConnectivity={evaluateConnectivity}
+              onOpenSimulator={() => setActiveTab('simulator')}
+            />
           )}
 
           {/* TAB 3: SECURITY GUARDRAILS */}
@@ -862,34 +784,36 @@ export default function App() {
                 NetImpact intercepts and blocks it if it breaches these guardrails.
               </p>
 
-              <table className="custom-table">
-                <thead>
-                  <tr>
-                    <th>Guardrail ID</th>
-                    <th>Name</th>
-                    <th>Forbidden Source</th>
-                    <th>Protected Destination</th>
-                    <th>Severity</th>
-                    <th>Regulatory Rationale</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {guardrails.map((g) => (
-                    <tr key={g.id}>
-                      <td style={{ fontFamily: 'var(--font-mono)', fontWeight: '600', color: '#60a5fa' }}>{g.id}</td>
-                      <td><strong>{g.name}</strong></td>
-                      <td><code>{g.forbidden_source}</code></td>
-                      <td><code>{g.forbidden_destination}</code></td>
-                      <td>
-                        <span className={`badge ${g.severity === 'CRITICAL' ? 'badge-critical' : 'badge-warning'}`}>
-                          {g.severity}
-                        </span>
-                      </td>
-                      <td style={{ fontSize: '0.82rem', color: '#9ca3af' }}>{g.rationale}</td>
+              <div className="table-responsive">
+                <table className="custom-table">
+                  <thead>
+                    <tr>
+                      <th>Guardrail ID</th>
+                      <th>Name</th>
+                      <th>Forbidden Source</th>
+                      <th>Protected Destination</th>
+                      <th>Severity</th>
+                      <th>Regulatory Rationale</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {guardrails.map((g) => (
+                      <tr key={g.id}>
+                        <td style={{ fontFamily: 'var(--font-mono)', fontWeight: '600', color: '#60a5fa' }}>{g.id}</td>
+                        <td><strong>{g.name}</strong></td>
+                        <td><code>{g.forbidden_source}</code></td>
+                        <td><code>{g.forbidden_destination}</code></td>
+                        <td>
+                          <span className={`badge ${g.severity === 'CRITICAL' ? 'badge-critical' : 'badge-warning'}`}>
+                            {g.severity}
+                          </span>
+                        </td>
+                        <td style={{ fontSize: '0.82rem', color: '#9ca3af' }}>{g.rationale}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           )}
 
@@ -905,40 +829,42 @@ export default function App() {
                 dictates the action. Unmatched traffic falls through to Rule 999 (Default Deny).
               </p>
 
-              <table className="custom-table">
-                <thead>
-                  <tr>
-                    <th>Priority</th>
-                    <th>Rule ID</th>
-                    <th>Rule Label</th>
-                    <th>Source</th>
-                    <th>Destination</th>
-                    <th>Port</th>
-                    <th>Protocol</th>
-                    <th>Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {policies.map((p) => (
-                    <tr key={p.id}>
-                      <td style={{ fontFamily: 'var(--font-mono)', fontWeight: '700', color: '#93c5fd' }}>
-                        #{p.priority}
-                      </td>
-                      <td style={{ fontFamily: 'var(--font-mono)' }}>{p.id}</td>
-                      <td><strong>{p.name}</strong></td>
-                      <td><code>{p.source_segment}</code></td>
-                      <td><code>{p.destination_resource}</code></td>
-                      <td>{p.port !== null ? p.port : 'ANY'}</td>
-                      <td>{p.protocol}</td>
-                      <td>
-                        <span className={`badge ${p.action === 'ALLOW' ? 'badge-allowed' : 'badge-denied'}`}>
-                          {p.action}
-                        </span>
-                      </td>
+              <div className="table-responsive">
+                <table className="custom-table">
+                  <thead>
+                    <tr>
+                      <th>Priority</th>
+                      <th>Rule ID</th>
+                      <th>Rule Label</th>
+                      <th>Source</th>
+                      <th>Destination</th>
+                      <th>Port</th>
+                      <th>Protocol</th>
+                      <th>Action</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {policies.map((p) => (
+                      <tr key={p.id}>
+                        <td style={{ fontFamily: 'var(--font-mono)', fontWeight: '700', color: '#93c5fd' }}>
+                          #{p.priority}
+                        </td>
+                        <td style={{ fontFamily: 'var(--font-mono)' }}>{p.id}</td>
+                        <td><strong>{p.name}</strong></td>
+                        <td><code>{p.source_segment}</code></td>
+                        <td><code>{p.destination_resource}</code></td>
+                        <td>{p.port !== null ? p.port : 'ANY'}</td>
+                        <td>{p.protocol}</td>
+                        <td>
+                          <span className={`badge ${p.action === 'ALLOW' ? 'badge-allowed' : 'badge-denied'}`}>
+                            {p.action}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           )}
         </div>

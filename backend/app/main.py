@@ -67,30 +67,40 @@ def get_guardrails():
     return load_security_guardrails()
 
 
-@app.post("/api/simulate", response_model=SimulationResponse)
-def run_simulation(request: SimulationRequest):
+def _validate_and_simulate(request: SimulationRequest) -> SimulationResponse:
+    """Validates source segment and destination resource, then runs the policy engine."""
     segments, resources = load_network_data()
-    
+
     if request.source_segment not in segments:
         raise HTTPException(
             status_code=400,
             detail=f"Source segment '{request.source_segment}' not found in network topology."
         )
-        
+
     if request.destination_resource not in resources:
         raise HTTPException(
             status_code=400,
             detail=f"Destination resource '{request.destination_resource}' not found."
         )
-        
-    result = simulate_policy_change(
+
+    return simulate_policy_change(
         source_segment=request.source_segment,
         destination_resource=request.destination_resource,
         port=request.port,
         protocol=request.protocol,
         proposed_rule=request.proposed_rule
     )
-    return result
+
+
+@app.post("/api/simulate", response_model=SimulationResponse)
+def run_simulation(request: SimulationRequest):
+    return _validate_and_simulate(request)
+
+
+@app.post("/api/connectivity", response_model=SimulationResponse)
+def analyze_connectivity(request: SimulationRequest):
+    """Calculates baseline and optional proposed connectivity using the Python policy engine."""
+    return _validate_and_simulate(request)
 
 
 @app.get("/api/example-scenarios")
